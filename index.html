@@ -191,7 +191,7 @@ async function coverageSave(){try{const m=covMovements.find(x=>x.id===$('covMove
 async function exportRH24(){try{
  const pid=$('covProject').value,start=$('rh24Start').value,file=$('rh24File').files[0];
  if(!pid||!start||!file)throw Error('Seleccioná proyecto, primer día y el machote RH-F-24.');
- if(!/\\.xlsx$/i.test(file.name))throw Error('El machote debe ser un archivo .xlsx.');
+ if(!/\.xlsx$/i.test(file.name))throw Error('El machote debe ser un archivo .xlsx.');
  const {data:vac,error}=await db.from('planillas_vacantes').select('posicion,nombre_anterior,fecha_inicio,fecha_fin').eq('proyecto_id',pid);
  if(error)throw error;
  const zip=await JSZip.loadAsync(file),wbXml=await zip.file('xl/workbook.xml')?.async('string'),relsXml=await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
@@ -204,7 +204,7 @@ async function exportRH24(){try{
   const day=new Date(base);day.setDate(base.getDate()+i-1);const iso=day.getFullYear()+'-'+String(day.getMonth()+1).padStart(2,'0')+'-'+String(day.getDate()).padStart(2,'0');
   const relevant=(vac||[]).filter(v=>v.fecha_inicio<=iso&&(!v.fecha_fin||v.fecha_fin>=iso));
   const target=relmap.get(sheetmap.get(String(i)));if(!target)throw Error('Falta hoja diaria '+i);
-  const path=target.startsWith('/')?target.slice(1):'xl/'+target.replace(/^\\.\\.\\//,'');
+  const path=target.startsWith('/')?target.slice(1):'xl/'+target.replace(/^\.\.\//,'');
   const entry=zip.file(path);if(!entry)throw Error('Falta archivo interno de hoja '+i);
   const doc=xmlParse(await entry.async('string'));const rows=[...doc.getElementsByTagNameNS(xmlNS,'row')];const rowmap=new Map(rows.map(x=>[Number(x.getAttribute('r')),x]));
   const readCell=(row,col)=>[...row.getElementsByTagNameNS(xmlNS,'c')].find(x=>x.parentNode===row&&x.getAttribute('r')===col+row.getAttribute('r'));
