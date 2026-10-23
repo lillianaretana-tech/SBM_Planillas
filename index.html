@@ -125,11 +125,12 @@ function officialFilename(project,from,to){
 function officialBlob(){const raw=atob(OFFICIAL_TEMPLATE_B64),arr=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)arr[i]=raw.charCodeAt(i);return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})}
 function downloadOriginalTemplate(){const url=URL.createObjectURL(officialBlob()),a=document.createElement('a');a.href=url;a.download='RH-F-27-Horarios_de_Trabajo_ORIGINAL.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);notice('Se descargó el machote original sin cambios; todavía no es una planilla semanal completada.')}
 let officialStaff=[],officialMoves=[],officialProject='',officialSchedules=new Map(),officialPeriod='';
+function movementInPeriod(m,from,to){return !!m.fecha_inicio&&m.estado!=='anulado'&&m.fecha_inicio<=to&&(m.fecha_fin||m.fecha_inicio)>=from;}
 async function prepareOfficial(){try{
 const p=$('ofiProyecto').value,from=$('ofiDesde').value,to=$('ofiHasta').value;if(!p||!from||!to||from>to)throw Error('Seleccioná proyecto y fechas válidas.');
 const proj=projects.find(x=>x.id===p);if(!proj)throw Error('Proyecto no disponible.');
 const {data:staff,error}=await db.from('vacaciones_expedientes_v2').select('id,expediente,proyecto').eq('proyecto',proj.codigo_vacaciones);if(error)throw error;
-let moves=[],page=0;while(true){const {data,error}=await db.from('planillas_movimientos').select('*').eq('proyecto_id',p).lte('fecha_inicio',to).or('fecha_fin.is.null,fecha_fin.gte.'+from).neq('estado','anulado').range(page*500,page*500+499);if(error)throw error;moves.push(...(data||[]));if(!data||data.length<500)break;page++;}
+let moves=[],page=0;while(true){const {data,error}=await db.from('planillas_movimientos').select('*').eq('proyecto_id',p).lte('fecha_inicio',to).or('and(fecha_fin.is.null,fecha_inicio.gte.'+from+'),fecha_fin.gte.'+from).neq('estado','anulado').range(page*500,page*500+499);if(error)throw error;moves.push(...(data||[]).filter(m=>movementInPeriod(m,from,to)));if(!data||data.length<500)break;page++;}
 officialStaff=staff||[];officialMoves=moves;officialProject=p;officialPeriod=from+'|'+to;officialSchedules=new Map();
 const ids=officialStaff.map(x=>x.id);if(ids.length){const {data:sch,error:se}=await db.from('vacaciones_horarios_v2').select('expediente_id,vigente_desde,turno,jornada,continuidad_pendiente,horario').in('expediente_id',ids).lte('vigente_desde',from).order('vigente_desde',{ascending:false});if(se)throw se;for(const h of sch||[])if(!officialSchedules.has(h.expediente_id))officialSchedules.set(h.expediente_id,h);}
 
@@ -222,9 +223,8 @@ if(!Array.isArray(h.horario)||h.horario.length!==7)throw Error('Horario semanal 
 for(let d=0;d<7;d++){const day=h.horario[(startDay+6+d)%7];const [inCol,outCol]=dayCols[d];if(day.trabaja){if(!day.entrada||!day.salida)throw Error('Falta hora de '+person.expediente?.nombre);setTime(r,inCol,day.entrada);setTime(r,outCol,day.salida);if(day.salida<=day.entrada){const c=getCell(row,outCol);const v=c.getElementsByTagNameNS(ns,'v')[0];v.textContent=String(Number(v.textContent)+1);}}else{writeText(r,inCol,'');writeText(r,outCol,'');writeText(r,['K','N','Q','T','W','Z','AC'][d],'');}}
 }else{writeText(r,'E','');for(let d=0;d<dayCols.length;d++){const [ic,oc]=dayCols[d];writeText(r,ic,'');writeText(r,oc,'');writeText(r,['K','N','Q','T','W','Z','AC'][d],'');}}
 // Nunca modificar las fórmulas del horario; limpiar únicamente observaciones de filas de personas.
-const movs=person?officialMoves.filter(m=>m.expediente_id===person.id):[];
+const movs=person?officialMoves.filter(m=>m.expediente_id===person.id&&movementInPeriod(m,from,to)):[];
 const observations=[];
-if(person&&resolveOfficialJornada(officialSchedules.get(person.id).jornada).warning)observations.push('REVISAR JORNADA: '+officialSchedules.get(person.id).jornada);
 observations.push(...movs.map(m=>fmtMov(m)+(m.ubicacion?' · Ubicación: '+m.ubicacion:'')));
 writeText(r,'AL',observations.join('\n'));
 getCell(row,'AL').setAttribute('s',String(observationStyleId));
