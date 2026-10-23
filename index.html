@@ -190,11 +190,12 @@ async function coverageSave(){try{const m=covMovements.find(x=>x.id===$('covMove
 async function coverageReview(){try{
  const project=$('covProject').value,from=$('covFrom').value,to=$('covTo').value;
  if(!project||!from||!to||from>to)throw Error('Elegí proyecto y fechas válidas.');
- const [mr,cr]=await Promise.all([
+ const [mr,cr,vr]=await Promise.all([
   db.from('planillas_movimientos').select('id,expediente_id,tipo,fecha_inicio,fecha_fin,horas,estado').eq('proyecto_id',project).neq('estado','anulado').lte('fecha_inicio',to).gte('fecha_fin',from).limit(1000),
-  db.from('planillas_coberturas').select('movimiento_id,fecha,horas,tipo_hora,estado').eq('proyecto_id',project).eq('estado','activo').gte('fecha',from).lte('fecha',to).limit(1000)
+  db.from('planillas_coberturas').select('movimiento_id,fecha,horas,tipo_hora,estado').eq('proyecto_id',project).eq('estado','activo').gte('fecha',from).lte('fecha',to).limit(1000),
+  db.from('planillas_vacantes').select('posicion,nombre_anterior,expediente_anterior_id,fecha_inicio,fecha_fin').eq('proyecto_id',project).lte('fecha_inicio',to).or('fecha_fin.is.null,fecha_fin.gte.'+from).limit(1000)
  ]);
- if(mr.error)throw mr.error;if(cr.error)throw cr.error;
+ if(mr.error)throw mr.error;if(cr.error)throw cr.error;if(vr.error)throw vr.error;
  // Include movements whose optional fecha_fin is NULL.
  const single=await db.from('planillas_movimientos').select('id,expediente_id,tipo,fecha_inicio,fecha_fin,horas,estado').eq('proyecto_id',project).neq('estado','anulado').is('fecha_fin',null).gte('fecha_inicio',from).lte('fecha_inicio',to).limit(1000);
  if(single.error)throw single.error;
@@ -204,11 +205,13 @@ async function coverageReview(){try{
  const names=Object.fromEntries(covPeople.map(x=>[x.id,x.expediente?.nombre||x.id]));
  const uncovered=movements.filter(m=>!by[m.id]?.length);
  const total=cov.reduce((n,c)=>n+Number(c.horas||0),0);
+ const vacancies=vr.data||[];
+ const vacancyHtml='<h3>Vacantes que coinciden con esta semana ('+vacancies.length+')</h3>'+(vacancies.length?'<table><tr><th>Posición</th><th>Anterior ocupante</th><th>Desde</th><th>Hasta</th></tr>'+vacancies.map(v=>'<tr><td>'+esc(v.posicion)+'</td><td>'+esc(v.nombre_anterior||names[v.expediente_anterior_id]||'No aplica')+'</td><td>'+esc(v.fecha_inicio)+'</td><td>'+esc(v.fecha_fin||'Abierta')+'</td></tr>').join('')+'</table>':'<p>No hay vacantes para este período.</p>');
  $('covReview').innerHTML='<p><strong>'+movements.length+'</strong> movimientos de ausencia/permisos/vacaciones · <strong>'+cov.length+'</strong> coberturas · <strong>'+total.toFixed(2)+'</strong> horas registradas · <strong>'+uncovered.length+'</strong> movimientos sin cobertura registrada.</p>'+
  (movements.length===0?'<p class="status">Sin movimientos: igualmente corresponde entregar la planilla semanal a RH.</p>':'')+
  '<p class="muted">Sin cobertura registrada no necesariamente significa que se requiera cobertura. Las horas registradas no equivalen automáticamente a horas ordinarias consumidas: el RH-F-24 aplica sus propios factores.</p>'+
  '<table><tr><th>Inicio</th><th>Colaborador</th><th>Movimiento</th><th>Coberturas</th><th>Horas registradas</th></tr>'+
- movements.sort((a,b)=>a.fecha_inicio.localeCompare(b.fecha_inicio)).map(m=>{const a=by[m.id]||[];return '<tr><td>'+esc(m.fecha_inicio)+'</td><td>'+esc(names[m.expediente_id]||m.expediente_id)+'</td><td>'+esc(m.tipo)+'</td><td>'+a.length+'</td><td>'+a.reduce((n,c)=>n+Number(c.horas||0),0).toFixed(2)+'</td></tr>'}).join('')+'</table>';
+ movements.sort((a,b)=>a.fecha_inicio.localeCompare(b.fecha_inicio)).map(m=>{const a=by[m.id]||[];return '<tr><td>'+esc(m.fecha_inicio)+'</td><td>'+esc(names[m.expediente_id]||m.expediente_id)+'</td><td>'+esc(m.tipo)+'</td><td>'+a.length+'</td><td>'+a.reduce((n,c)=>n+Number(c.horas||0),0).toFixed(2)+'</td></tr>'}).join('')+'</table>'+vacancyHtml;
  if(mr.data?.length===1000||single.data?.length===1000||cov.length===1000) $('covReview').insertAdjacentHTML('afterbegin','<p class="muted">Atención: el período supera el límite de consulta; dividilo en períodos más pequeños.</p>');
  }catch(e){notice('Revisión: '+e.message,true)}}
 async function coverageAnnul(id){if(!confirm('¿Anular esta cobertura? Se conserva en el historial.'))return;const {error}=await db.from('planillas_coberturas').update({estado:'anulado',actualizado:new Date().toISOString()}).eq('id',id);if(error)notice(error.message,true);else{notice('Cobertura anulada.');await coverageShow()}}
