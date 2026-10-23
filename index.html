@@ -225,7 +225,7 @@ for(let d=0;d<7;d++){const day=h.horario[(startDay+6+d)%7];const [inCol,outCol]=
 // Nunca modificar las fórmulas del horario; limpiar únicamente observaciones de filas de personas.
 const movs=person?officialMoves.filter(m=>m.expediente_id===person.id&&movementInPeriod(m,from,to)):[];
 const observations=[];
-observations.push(...movs.map(m=>fmtMov(m)+(m.ubicacion?' · Ubicación: '+m.ubicacion:'')));
+observations.push(...movs.map(m=>fmtMov(m)+(m.ubicacion?' · '+m.ubicacion:'')));
 writeText(r,'AL',observations.join('\n'));
 getCell(row,'AL').setAttribute('s',String(observationStyleId));
 if(observations.length){const lines=observations.join('\n').split('\n').reduce((n,line)=>n+Math.max(1,Math.ceil(line.length/52)),0);row.setAttribute('ht',String(Math.min(409,Math.max(Number(row.getAttribute('ht')||0),lines*15+5))));row.setAttribute('customHeight','1');}
