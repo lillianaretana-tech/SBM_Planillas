@@ -59,7 +59,7 @@ $('vacForm').addEventListener('submit',async e=>{
  e.preventDefault();
  const v=id=>$(id).value;
  const row={proyecto_id:v('vacProyecto'),posicion:v('vacPosicion').trim(),expediente_anterior_id:v('vacPersona')||null,nombre_anterior:v('vacNombre').trim()||null,fecha_inicio:v('vacInicio'),fecha_fin:v('vacFin')||null,puesto_rh24:v('vacPuesto'),horario_rh24:v('vacHorario'),jornada_rh24:v('vacJornada'),observaciones:v('vacObs').trim()||null};
- if(!row.jornada_rh24.endsWith(row.horario_rh24)&&!(row.horario_rh24==='Nocturno'&&row.jornada_rh24.endsWith('Nocturna')))return notice('El horario y la jornada deben coincidir.',true);
+ if(!row.jornada_rh24.endsWith(({Diurno:'Diurna',Nocturno:'Nocturna'})[row.horario_rh24]||row.horario_rh24))return notice('El horario y la jornada deben coincidir.',true);
  if(row.fecha_fin&&row.fecha_fin<row.fecha_inicio)return notice('La fecha final no puede ser anterior al inicio.',true);
  const {data:{user}}=await db.auth.getUser();if(!user)return notice('Debés iniciar sesión.',true);
  row.creado_por=user.id;
@@ -132,6 +132,39 @@ $('ofiPreview').innerHTML='<h3>Movimientos de la semana</h3>'+(moves.length?'<ta
 }catch(e){notice(e.message,true);$('ofiStatus').textContent=e.message;}}
 
 
+
+function translateFormula(formula,origin,target){
+ const coord=ref=>{const m=ref.match(/^([A-Z]+)(\d+)$/);return [Array.from(m[1]).reduce((a,c)=>a*26+c.charCodeAt(0)-64,0),Number(m[2])];};
+ const [oc,or]=coord(origin),[tc,tr]=coord(target);
+ const letters=n=>{let s='';while(n>0){n--;s=String.fromCharCode(65+n%26)+s;n=Math.floor(n/26);}return s;};
+ // Quoted Excel strings are never references.
+ return formula.split(/("(?:[^"]|"")*")/g).map((part,i)=>i%2?part:part.replace(/(?<![A-Z0-9_\.])([\$]?)([A-Z]{1,3})([\$]?)(\d+)(?![A-Z0-9_\(])/g,(all,ac,col,ar,row)=>{
+ const c=ac?coord(col+'1')[0]:coord(col+'1')[0]+tc-oc,r=Number(row)+(ar?0:tr-or);return c>0&&r>0?ac+letters(c)+ar+r:'#REF!';})).join('');
+}
+function expandSharedFormulas(doc){
+ const masters=new Map(),formulas=[...doc.getElementsByTagNameNS(xmlNS,'f')];
+ for(const f of formulas)if(f.getAttribute('t')==='shared'&&f.textContent.trim())masters.set(f.getAttribute('si'),{ref:f.parentNode.getAttribute('r'),text:f.textContent});
+ for(const f of formulas)if(f.getAttribute('t')==='shared'){
+ const master=masters.get(f.getAttribute('si'));if(!master)throw Error('Fórmula compartida sin origen en '+f.parentNode.getAttribute('r'));
+ f.textContent=translateFormula(master.text,master.ref,f.parentNode.getAttribute('r'));for(const a of ['t','si','ref'])f.removeAttribute(a);
+ }
+}
+async function resetCalculationChain(zip){
+ zip.remove('xl/calcChain.xml');
+ for(const [path,tag,attr,value] of [['xl/_rels/workbook.xml.rels','Relationship','Type','/calcChain'],['[Content_Types].xml','Override','PartName','/xl/calcChain.xml']]){
+ const entry=zip.file(path);if(!entry)continue;const doc=xmlParse(await entry.async('string'));
+ for(const el of [...doc.getElementsByTagNameNS('*',tag)])if((el.getAttribute(attr)||'').endsWith(value))el.parentNode.removeChild(el);
+ zip.file(path,new XMLSerializer().serializeToString(doc));
+ }
+ const path='xl/workbook.xml',doc=xmlParse(await zip.file(path).async('string'));let calc=doc.getElementsByTagNameNS(xmlNS,'calcPr')[0];if(!calc){calc=doc.createElementNS(xmlNS,'calcPr');doc.documentElement.appendChild(calc);}calc.setAttribute('calcMode','auto');calc.setAttribute('fullCalcOnLoad','1');calc.setAttribute('forceFullCalc','1');zip.file(path,new XMLSerializer().serializeToString(doc));
+}
+function resolveOfficialJornada(value){
+ const text=String(value||''),key=normName(text.split('(')[0]);
+ const known=['Completa-Día-Discontinua (Columna F=48)','Completa-Día-Continua (Columna H=48)','Parcial-Día-Discontinua (Columna F=42)','Parcial-Día-Continua (Columna H=42)','Completa-Mixta-Discontinua (Columna F=42)','Completa-Mixta-Continua (Columna H=42)','Parcial-Mixta-Discontinua (Columna F=36:45)','Completa-Noche-Discontinua (Columna F=36)','Completa-Noche-Continua (Columna H=36)','Parcial-Noche-Discontinua (Columna F=31:50)','Parcial-Noche-Discontinua (Columna F=30:00) Autorización Esp. '];
+ const exact=known.find(x=>x===text),match=exact||known.find(x=>normName(x.split('(')[0])===key);
+ return {text:match||text,warning:!match?'Clasificación sin equivalencia en el machote: '+text:match!==text?'Origen: '+text+'; borrador: '+match+'. Confirmar clasificación.':''};
+}
+
 async function generatePartialOfficial(){try{
 const p=$('ofiProyecto').value,from=$('ofiDesde').value,to=$('ofiHasta').value;
 if(!p||!from||!to||from>to)throw Error('Seleccioná proyecto y fechas válidas.');
@@ -139,15 +172,19 @@ if(officialProject!==p||officialPeriod!==from+'|'+to||!officialStaff.length)thro
 if(!window.JSZip)throw Error('No cargó el lector de Excel.');
 if(officialStaff.some(x=>!officialSchedules.has(x.id)))throw Error('Faltan horarios vigentes para algunos colaboradores. No se inventan turnos.');
 const shifts=new Map(officialStaff.map(x=>[x.id,officialSchedules.get(x.id).turno]));
+if([...shifts.values()].some(x=>!['diurno','mixto','nocturno'].includes(x)))throw Error('Hay colaboradores con turno no reconocido.');
 const groups=[['diurno',10,29,30],['mixto',32,51,52],['nocturno',54,73,74]];
 const zip=await JSZip.loadAsync(Uint8Array.from(atob(OFFICIAL_TEMPLATE_B64),c=>c.charCodeAt(0)));
 const path='xl/worksheets/sheet1.xml',doc=xmlParse(await zip.file(path).async('string'));
 const ns=xmlNS,rows=new Map([...doc.getElementsByTagNameNS(ns,'row')].map(r=>[Number(r.getAttribute('r')),r]));
+expandSharedFormulas(doc);
+
 function colnum(s){return [...s].reduce((v,c)=>v*26+c.charCodeAt(0)-64,0)}
 function getCell(row,col){const ref=col+row.getAttribute('r');let c=xCells(row).find(x=>x.getAttribute('r')===ref);if(!c){c=doc.createElementNS(ns,'c');c.setAttribute('r',ref);const after=xCells(row).find(x=>colnum(x.getAttribute('r').match(/^[A-Z]+/)[0])>colnum(col));if(after)row.insertBefore(c,after);else row.appendChild(c);}return c;}
 function writeText(r,col,value){const c=getCell(rows.get(r),col);while(c.firstChild)c.removeChild(c.firstChild);c.setAttribute('t','inlineStr');const is=doc.createElementNS(ns,'is'),t=doc.createElementNS(ns,'t');t.setAttribute('xml:space','preserve');t.textContent=String(value);is.appendChild(t);c.appendChild(is);}
 function writeNumber(r,col,value){const c=getCell(rows.get(r),col);while(c.firstChild)c.removeChild(c.firstChild);c.removeAttribute('t');const v=doc.createElementNS(ns,'v');v.textContent=String(value);c.appendChild(v);}
-function copySampleCalculatedCells(sampleRow,targetRow){const source=rows.get(sampleRow),dest=rows.get(targetRow);if(!source||!dest)return;for(const col of ['K','N','Q','T','W','Z','AC']){const sc=xCells(source).find(x=>x.getAttribute('r')===col+sampleRow);if(!sc)continue;const target=getCell(dest,col);if(target.getElementsByTagNameNS(ns,'f').length)continue;const sf=sc.getElementsByTagNameNS(ns,'f')[0];if(sf){if(sf.getAttribute('t')==='shared'||!sf.textContent.trim())continue;while(target.firstChild)target.removeChild(target.firstChild);const f=doc.createElementNS(ns,'f');f.textContent=sf.textContent.replace(/(\$?[A-Z]{1,3})(\$?)(\d+)/g,(full,letter,absolute,num)=>absolute?full:letter+(Number(num)+targetRow-sampleRow));target.appendChild(f);}else if(!target.hasChildNodes()){for(const child of [...sc.childNodes])target.appendChild(child.cloneNode(true));}}}
+function copySampleCalculatedCells(sampleRow,targetRow){const source=rows.get(sampleRow),dest=rows.get(targetRow);if(!source||!dest)throw Error('Falta fila de fórmulas de almuerzo.');for(const col of ['K','N','Q','T','W','Z','AC']){const sc=xCells(source).find(x=>x.getAttribute('r')===col+sampleRow),sf=sc?.getElementsByTagNameNS(ns,'f')[0];if(!sf?.textContent)throw Error('Falta fórmula oficial de almuerzo '+col+sampleRow);const target=getCell(dest,col);while(target.firstChild)target.removeChild(target.firstChild);target.removeAttribute('t');const f=doc.createElementNS(ns,'f');f.textContent=translateFormula(sf.textContent,col+sampleRow,col+targetRow);target.appendChild(f);}}
+
 function writeFormula(r,col,formula,cached){const c=getCell(rows.get(r),col);while(c.firstChild)c.removeChild(c.firstChild);c.removeAttribute('t');const f=doc.createElementNS(ns,'f');f.textContent=formula;const v=doc.createElementNS(ns,'v');v.textContent=String(cached);c.appendChild(f);c.appendChild(v);}
 const proj=projects.find(x=>x.id===p);writeText(3,'L',proj.nombre+' · '+from+' al '+to);
 // Los textos oficiales de jornada están en C203:C216 como cadenas compartidas.
@@ -159,24 +196,27 @@ function setTime(r,col,hhmm){const [h,m]=String(hhmm).split(':').map(Number);if(
 const startDay=new Date(from+'T12:00:00').getDay();
 const dayCols=[['I','J'],['L','M'],['O','P'],['R','S'],['U','V'],['X','Y'],['AA','AB']];
 
-const counts=[];
+const counts=[],jornadaWarnings=[];
+// C206 is an empty classification slot already referenced by official lunch formulas.
+writeText(206,'C','Parcial-Día-Continua (Columna H=42)');
 for(const [shift,first,last,total] of groups){const members=officialStaff.filter(x=>shifts.get(x.id)===shift);if(members.length>last-first+1)throw Error('El bloque '+shift+' tiene más de 20 colaboradores.');counts.push(members.length);
-for(let r=first;r<=last;r++){const row=rows.get(r);if(!row)throw Error('No se encontró fila '+r);const person=members[r-first];if(person)copySampleCalculatedCells(first-1,r);row.setAttribute('hidden',person?'0':'1');writeText(r,'B',person?.expediente?.posicion||'');writeText(r,'D',person?.expediente?.nombre||'');
-if(person){const h=officialSchedules.get(person.id);setShared(r,'E',h.jornada);
+for(let r=first;r<=last;r++){const row=rows.get(r);if(!row)throw Error('No se encontró fila '+r);const person=members[r-first];copySampleCalculatedCells(shift==='diurno'?8:first-1,r);row.setAttribute('hidden',person?'0':'1');if(person)writeNumber(r,'B',r-first+1);else writeText(r,'B','');writeText(r,'C',person?.expediente?.posicion||'');writeText(r,'D',person?.expediente?.nombre||'');
+if(person){const h=officialSchedules.get(person.id);const mapped=resolveOfficialJornada(h.jornada);setShared(r,'E',mapped.text);if(mapped.warning)jornadaWarnings.push(person.expediente?.nombre+': '+mapped.warning);
 if(!Array.isArray(h.horario)||h.horario.length!==7)throw Error('Horario semanal incompleto de '+person.expediente?.nombre);
-for(let d=0;d<7;d++){const day=h.horario[(startDay+6+d)%7];const [inCol,outCol]=dayCols[d];if(day.trabaja){if(!day.entrada||!day.salida)throw Error('Falta hora de '+person.expediente?.nombre);setTime(r,inCol,day.entrada);setTime(r,outCol,day.salida);if(day.salida<=day.entrada){const c=getCell(row,outCol);const v=c.getElementsByTagNameNS(ns,'v')[0];v.textContent=String(Number(v.textContent)+1);}}else{writeText(r,inCol,'');writeText(r,outCol,'');}}
+for(let d=0;d<7;d++){const day=h.horario[(startDay+6+d)%7];const [inCol,outCol]=dayCols[d];if(day.trabaja){if(!day.entrada||!day.salida)throw Error('Falta hora de '+person.expediente?.nombre);setTime(r,inCol,day.entrada);setTime(r,outCol,day.salida);if(day.salida<=day.entrada){const c=getCell(row,outCol);const v=c.getElementsByTagNameNS(ns,'v')[0];v.textContent=String(Number(v.textContent)+1);}}else{writeText(r,inCol,'');writeText(r,outCol,'');writeNumber(r,['K','N','Q','T','W','Z','AC'][d],0);}}
 }else{writeText(r,'E','');for(const [ic,oc] of dayCols){writeText(r,ic,'');writeText(r,oc,'');}}
 // Nunca modificar las fórmulas del horario; limpiar únicamente observaciones de filas de personas.
 const movs=person?officialMoves.filter(m=>m.expediente_id===person.id):[];
-writeText(r,'AK',movs.map(m=>m.tipo+' '+m.fecha_inicio+(m.fecha_fin&&m.fecha_fin!==m.fecha_inicio?' a '+m.fecha_fin:'')+(m.horas?' ('+m.horas+' h)':'')+(m.detalle?' '+m.detalle:'')).join(' | '));
+writeText(r,'AK',(person&&resolveOfficialJornada(officialSchedules.get(person.id).jornada).warning?'REVISAR JORNADA: '+officialSchedules.get(person.id).jornada+' | ':'')+movs.map(m=>m.tipo+' '+m.fecha_inicio+(m.fecha_fin&&m.fecha_fin!==m.fecha_inicio?' a '+m.fecha_fin:'')+(m.horas?' ('+m.horas+' h)':'')+(m.detalle?' '+m.detalle:'')).join(' | '));
 }
-writeFormula(total,'B','COUNTA(D'+first+':D'+last+')',members.length);
+// Preserve the official COUNT formula; unused B cells are blank.
 }
 // La fila de ejemplo se oculta; los encabezados y filas de subtotales permanecen visibles.
-rows.get(9)?.setAttribute('hidden','1');writeFormula(76,'B','B30+B52+B74',counts.reduce((a,b)=>a+b,0));
+rows.get(9)?.setAttribute('hidden','1');
 zip.file(path,new XMLSerializer().serializeToString(doc));
+await resetCalculationChain(zip);
 const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='BORRADOR_HORARIOS_RH-F-27_'+proj.nombre.replace(/[^a-z0-9]/gi,'_')+'_'+from+'.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
-$('ofiStatus').textContent='Borrador generado · Diurno '+counts[0]+' · Tarde-noche '+counts[1]+' · Noche '+counts[2]+' · TOTAL '+counts.reduce((a,b)=>a+b,0)+'. Horarios reales cargados. Revisar jornadas no homologadas antes de enviar.';
+$('ofiStatus').textContent='Borrador generado · Diurno '+counts[0]+' · Tarde-noche '+counts[1]+' · Noche '+counts[2]+' · TOTAL '+counts.reduce((a,b)=>a+b,0)+'. Horarios reales cargados. '+jornadaWarnings.join(' | ');
 notice('Borrador con horarios reales descargado. Revisá las jornadas pendientes antes de enviar.');
 }catch(e){notice(e.message,true);$('ofiStatus').textContent=e.message;}}
 
@@ -195,13 +235,14 @@ async function exportRH24(){try{
  const pid=$('covProject').value,start=$('rh24Start').value,file=$('rh24File').files[0];
  if(!pid||!start||!file)throw Error('Seleccioná proyecto, primer día y el machote RH-F-24.');
  if(!/\.xlsx$/i.test(file.name))throw Error('El machote debe ser un archivo .xlsx.');
- const {data:vac,error}=await db.from('planillas_vacantes').select('posicion,nombre_anterior,fecha_inicio,fecha_fin').eq('proyecto_id',pid);
+ const {data:vac,error}=await db.from('planillas_vacantes').select('posicion,nombre_anterior,fecha_inicio,fecha_fin,puesto_rh24,horario_rh24,jornada_rh24').eq('proyecto_id',pid);
  if(error)throw error;
  const zip=await JSZip.loadAsync(file),wbXml=await zip.file('xl/workbook.xml')?.async('string'),relsXml=await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
  if(!wbXml||!relsXml)throw Error('El archivo no es un machote Excel válido.');
  const wb=xmlParse(wbXml),rels=xmlParse(relsXml);
  const relmap=new Map([...rels.getElementsByTagName('Relationship')].map(x=>[x.getAttribute('Id'),x.getAttribute('Target')]));
  const sheets=[...wb.getElementsByTagNameNS(xmlNS,'sheet')],sheetmap=new Map(sheets.map(x=>[x.getAttribute('name'),x.getAttribute('r:id')||x.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id')]));
+ const ssEntry=zip.file('xl/sharedStrings.xml'),ssDoc=ssEntry?xmlParse(await ssEntry.async('string')):null;const strings=ssDoc?[...ssDoc.getElementsByTagNameNS(xmlNS,'si')].map(x=>xmlText(x,'t')):[];
  const base=new Date(start+'T12:00:00');let count=0,days=0,warnings=[];
  for(let i=1;i<=35;i++){
   const day=new Date(base);day.setDate(base.getDate()+i-1);const iso=day.getFullYear()+'-'+String(day.getMonth()+1).padStart(2,'0')+'-'+String(day.getDate()).padStart(2,'0');
@@ -212,18 +253,18 @@ async function exportRH24(){try{
   const doc=xmlParse(await entry.async('string'));const rows=[...doc.getElementsByTagNameNS(xmlNS,'row')];const rowmap=new Map(rows.map(x=>[Number(x.getAttribute('r')),x]));
   const readCell=(row,col)=>[...row.getElementsByTagNameNS(xmlNS,'c')].find(x=>x.parentNode===row&&x.getAttribute('r')===col+row.getAttribute('r'));
   const value=x=>x?.getElementsByTagNameNS(xmlNS,'v')[0]?.textContent||'';
-  const write=(row,col,text)=>{let cell=readCell(row,col);if(!cell){cell=doc.createElementNS(xmlNS,'c');cell.setAttribute('r',col+row.getAttribute('r'));row.appendChild(cell);}while(cell.firstChild)cell.removeChild(cell.firstChild);cell.setAttribute('t','inlineStr');const ins=doc.createElementNS(xmlNS,'is'),t=doc.createElementNS(xmlNS,'t');t.textContent=text;ins.appendChild(t);cell.appendChild(ins);};
+  const write=(row,col,text)=>{let cell=readCell(row,col);if(!cell){cell=doc.createElementNS(xmlNS,'c');cell.setAttribute('r',col+row.getAttribute('r'));const next=[...row.children].find(c=>c.localName==='c'&&c.getAttribute('r').replace(/\d+$/,'').split('').reduce((n,x)=>n*26+x.charCodeAt(0)-64,0)>col.split('').reduce((n,x)=>n*26+x.charCodeAt(0)-64,0));row.insertBefore(cell,next||null);}while(cell.firstChild)cell.removeChild(cell.firstChild);cell.setAttribute('t','inlineStr');const ins=doc.createElementNS(xmlNS,'is'),t=doc.createElementNS(xmlNS,'t');t.textContent=text;ins.appendChild(t);cell.appendChild(ins);};
   const mark=(row)=>{let cell=readCell(row,'G');if(!cell){cell=doc.createElementNS(xmlNS,'c');cell.setAttribute('r','G'+row.getAttribute('r'));row.appendChild(cell);}while(cell.firstChild)cell.removeChild(cell.firstChild);cell.removeAttribute('t');const v=doc.createElementNS(xmlNS,'v');v.textContent='1';cell.appendChild(v);};
-  const free=rows.filter(row=>{const n=Number(row.getAttribute('r'));return n>=9&&n<=56&&(!readCell(row,'B')||!readCell(row,'B').getElementsByTagNameNS(xmlNS,'f').length)&&(!readCell(row,'B')||!readCell(row,'B').getElementsByTagNameNS(xmlNS,'is').length||!readCell(row,'B').textContent.trim())&&value(readCell(row,'G'))==='0';});
+  const free=rows.filter(row=>{const n=Number(row.getAttribute('r')),b=readCell(row,'B'),name=cellVal(b,strings).trim();return n>=9&&n<=56&&!b?.getElementsByTagNameNS(xmlNS,'f').length&&(!name||name==='0')&&value(readCell(row,'G'))==='0';});
   if(relevant.length>free.length)throw Error('No hay suficientes filas vacías en la hoja '+i+' para '+relevant.length+' vacantes.');
-  relevant.forEach((v,j)=>{const row=free[j];write(row,'B','VACANTE — '+(v.nombre_anterior||v.posicion||'No aplica'));mark(row);count++;});
+  relevant.forEach((v,j)=>{const row=free[j];write(row,'B','VACANTE — '+(v.nombre_anterior||v.posicion||'No aplica'));for(const [col,key] of [['C','puesto_rh24'],['D','horario_rh24'],['F','jornada_rh24']])if(v[key])write(row,col,v[key]);else warnings.push(iso+': falta '+key+' de '+(v.nombre_anterior||v.posicion));mark(row);count++;});
   if(relevant.length){days++;warnings.push(iso+': '+relevant.length+' vacante(s)');}
   if(i===1){const row=rowmap.get(4),cell=readCell(row,'F');if(!cell)throw Error('No se encontró fecha F4.');const excelDate=Math.round((Date.UTC(day.getFullYear(),day.getMonth(),day.getDate())-Date.UTC(1899,11,30))/86400000);while(cell.firstChild)cell.removeChild(cell.firstChild);cell.removeAttribute('t');const v=doc.createElementNS(xmlNS,'v');v.textContent=String(excelDate);cell.appendChild(v);const project=projects.find(p=>p.id===pid);write(row,'G',project?.nombre||'');}
   zip.file(path,new XMLSerializer().serializeToString(doc));
  }
  const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'}),url=URL.createObjectURL(blob),a=document.createElement('a');
  a.href=url;a.download='BORRADOR_RH-F-24_VACANTES_'+start+'.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
- $('rh24Status').textContent='Generado: '+count+' marcas de vacante en '+days+' días. Revisar las columnas C, D y F (puesto, horario, jornada), que no se completan automáticamente.';
+ $('rh24Status').textContent='Generado: '+count+' marcas de vacante en '+days+' días. Columnas C, D y F completadas cuando están registradas. Revisar clasificaciones pendientes. '+warnings.filter(x=>x.includes('falta ')).slice(0,8).join(' | ');
  notice('Borrador RH-F-24 descargado. Revisá puestos y jornadas antes de enviarlo.');
  }catch(e){notice('RH-F-24: '+e.message,true);$('rh24Status').textContent=e.message;}}
 async function coverageReview(){try{
