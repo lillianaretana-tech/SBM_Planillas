@@ -269,7 +269,14 @@ async function exportRH24(){try{
  const sheets=[...wb.getElementsByTagNameNS(xmlNS,'sheet')],sheetmap=new Map(sheets.map(x=>[x.getAttribute('name'),x.getAttribute('r:id')||x.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id')]));
  const ssEntry=zip.file('xl/sharedStrings.xml'),ssDoc=ssEntry?xmlParse(await ssEntry.async('string')):null;const strings=ssDoc?[...ssDoc.getElementsByTagNameNS(xmlNS,'si')].map(x=>xmlText(x,'t')):[];
  const base=new Date(start+'T12:00:00');let count=0,days=0,warnings=[];
- for(let i=1;i<=35;i++){
+ const dailyNumbers=[...sheetmap.keys()].filter(x=>/^[1-9]\d*$/.test(x)).map(Number).sort((a,b)=>a-b);
+ if(!dailyNumbers.length||dailyNumbers.some((n,i)=>n!==i+1))throw Error('Las hojas diarias deben estar numeradas desde 1, sin saltos.');
+ const lastDay=new Date(base);lastDay.setDate(base.getDate()+dailyNumbers.length-1);
+ const lastISO=lastDay.getFullYear()+'-'+String(lastDay.getMonth()+1).padStart(2,'0')+'-'+String(lastDay.getDate()).padStart(2,'0');
+ const vacancyPosition=v=>v.puesto_rh24||(normName(v.posicion)==='MISCELANEO'||normName(v.posicion)==='MISCELANEO A'?'Misceláneo (a)':'');
+ const incomplete=(vac||[]).filter(v=>v.fecha_inicio<=lastISO&&(!v.fecha_fin||v.fecha_fin>=start)).map(v=>{const missing=[];if(!vacancyPosition(v))missing.push('puesto');if(!v.horario_rh24)missing.push('horario general');if(!v.jornada_rh24)missing.push('jornada');return missing.length?(v.nombre_anterior||v.posicion)+': '+missing.join(', '):'';}).filter(Boolean);
+ if(incomplete.length)throw Error('Antes de generar, completá en Vacantes → Editar: '+incomplete.join(' | ')+'. Sin estos datos el machote no puede calcular las horas disponibles.');
+ for(const i of dailyNumbers){
   const day=new Date(base);day.setDate(base.getDate()+i-1);const iso=day.getFullYear()+'-'+String(day.getMonth()+1).padStart(2,'0')+'-'+String(day.getDate()).padStart(2,'0');
   const relevant=(vac||[]).filter(v=>v.fecha_inicio<=iso&&(!v.fecha_fin||v.fecha_fin>=iso));
   const target=relmap.get(sheetmap.get(String(i)));if(!target)throw Error('Falta hoja diaria '+i);
@@ -282,14 +289,22 @@ async function exportRH24(){try{
   const mark=(row)=>{let cell=readCell(row,'G');if(!cell){cell=doc.createElementNS(xmlNS,'c');cell.setAttribute('r','G'+row.getAttribute('r'));row.appendChild(cell);}while(cell.firstChild)cell.removeChild(cell.firstChild);cell.removeAttribute('t');const v=doc.createElementNS(xmlNS,'v');v.textContent='1';cell.appendChild(v);};
   const free=rows.filter(row=>{const n=Number(row.getAttribute('r')),b=readCell(row,'B'),name=cellVal(b,strings).trim();return n>=9&&n<=56&&!b?.getElementsByTagNameNS(xmlNS,'f').length&&(!name||name==='0')&&value(readCell(row,'G'))==='0';});
   if(relevant.length>free.length)throw Error('No hay suficientes filas vacías en la hoja '+i+' para '+relevant.length+' vacantes.');
-  relevant.forEach((v,j)=>{const row=free[j];write(row,'B','VACANTE — '+(v.nombre_anterior||v.posicion||'No aplica'));for(const [col,key] of [['C','puesto_rh24'],['D','horario_rh24'],['F','jornada_rh24']])if(v[key])write(row,col,v[key]);else warnings.push(iso+': falta '+key+' de '+(v.nombre_anterior||v.posicion));mark(row);count++;});
+  relevant.forEach((v,j)=>{const row=free[j];write(row,'B','VACANTE — '+(v.nombre_anterior||v.posicion||'No aplica'));for(const [col,key] of [['C','puesto_rh24'],['D','horario_rh24'],['F','jornada_rh24']])write(row,col,key==='puesto_rh24'?vacancyPosition(v):v[key]);mark(row);count++;});
   if(relevant.length){days++;warnings.push(iso+': '+relevant.length+' vacante(s)');}
-  if(i===1){const row=rowmap.get(4),cell=readCell(row,'F');if(!cell)throw Error('No se encontró fecha F4.');const excelDate=Math.round((Date.UTC(day.getFullYear(),day.getMonth(),day.getDate())-Date.UTC(1899,11,30))/86400000);while(cell.firstChild)cell.removeChild(cell.firstChild);cell.removeAttribute('t');const v=doc.createElementNS(xmlNS,'v');v.textContent=String(excelDate);cell.appendChild(v);const project=projects.find(p=>p.id===pid);write(row,'G',project?.nombre||'');}
+  const dateRow=rowmap.get(4),dateCell=dateRow&&readCell(dateRow,'F');if(!dateCell)throw Error('No se encontró fecha F4 en la hoja '+i);
+  const excelDate=Math.round((Date.UTC(day.getFullYear(),day.getMonth(),day.getDate())-Date.UTC(1899,11,30))/86400000);
+  dateCell.removeAttribute('t');for(const child of [...dateCell.children])if(child.localName!=='f')dateCell.removeChild(child);
+  if(i===1){for(const f of [...dateCell.getElementsByTagNameNS(xmlNS,'f')])dateCell.removeChild(f);}
+  else if(!dateCell.getElementsByTagNameNS(xmlNS,'f').length){const f=doc.createElementNS(xmlNS,'f');f.textContent="+'"+(i-1)+"'!F4+1";dateCell.appendChild(f);}
+  const dateValue=doc.createElementNS(xmlNS,'v');dateValue.textContent=String(excelDate);dateCell.appendChild(dateValue);
+  const project=projects.find(p=>p.id===pid);if(i===1)write(dateRow,'G',project?.nombre||'');
+
   zip.file(path,new XMLSerializer().serializeToString(doc));
  }
+ await resetCalculationChain(zip);
  const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'}),url=URL.createObjectURL(blob),a=document.createElement('a');
  a.href=url;a.download='BORRADOR_RH-F-24_VACANTES_'+start+'.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
- $('rh24Status').textContent='Generado: '+count+' marcas de vacante en '+days+' días. Columnas C, D y F completadas cuando están registradas. Revisar clasificaciones pendientes. '+warnings.filter(x=>x.includes('falta ')).slice(0,8).join(' | ');
+ $('rh24Status').textContent='Generado: '+dailyNumbers.length+' hojas con fechas consecutivas desde '+start+'. '+count+' marcas de vacante en '+days+' días. Puesto, horario y jornada completos. '+warnings.filter(x=>x.includes('falta ')).slice(0,8).join(' | ');
  notice('Borrador RH-F-24 descargado. Revisá puestos y jornadas antes de enviarlo.');
  }catch(e){notice('RH-F-24: '+e.message,true);$('rh24Status').textContent=e.message;}}
 async function coverageReview(){try{
