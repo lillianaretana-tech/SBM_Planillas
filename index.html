@@ -123,7 +123,10 @@ async function downloadReport(){try{if(!window.ExcelJS)throw Error('No cargó el
 let officialCache=null;
 const xmlNS='http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 function normName(x){return String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z ]/g,' ').replace(/\s+/g,' ').trim()}
-function officialSetup(){const el=$('ofiProyecto');el.innerHTML='<option value="">Elegí proyecto</option>'+projects.filter(p=>p.tipo!=='backup').map(p=>'<option value="'+esc(p.id)+'">'+esc(p.nombre)+'</option>').join('');const d=new Date();const day=d.getDay();d.setDate(d.getDate()-((day+6)%7));$('ofiDesde').value=d.toISOString().slice(0,10);d.setDate(d.getDate()+6);$('ofiHasta').value=d.toISOString().slice(0,10)}
+const UBER_COMBINED_REPORT='uber_cedral_bambu';
+function officialReportProjects(){const available=projects.filter(p=>p.tipo!=='backup');const cedral=available.find(p=>p.codigo_vacaciones==='UBER CEDRAL'),bambu=available.find(p=>p.codigo_vacaciones==='UBER BAMBU');return available.map(p=>({...p,sourceProjects:[p]})).concat(cedral&&bambu?[{id:UBER_COMBINED_REPORT,nombre:'Uber Cedral y Bambú',sourceProjects:[cedral,bambu]}]:[]);}
+function officialReportProject(id){return officialReportProjects().find(p=>p.id===id);}
+function officialSetup(){const el=$('ofiProyecto');el.innerHTML='<option value="">Elegí proyecto</option>'+officialReportProjects().map(p=>'<option value="'+esc(p.id)+'">'+esc(p.nombre)+'</option>').join('');const d=new Date();const day=d.getDay();d.setDate(d.getDate()-((day+6)%7));$('ofiDesde').value=d.toISOString().slice(0,10);d.setDate(d.getDate()+6);$('ofiHasta').value=d.toISOString().slice(0,10)}
 function xmlText(x,tag){return [...x.getElementsByTagNameNS(xmlNS,tag)].map(t=>t.textContent||'').join('')}
 function xCells(row){return [...row.getElementsByTagNameNS(xmlNS,'c')].filter(c=>c.parentNode===row)}
 function cellVal(c,strings){if(!c)return '';const v=c.getElementsByTagNameNS(xmlNS,'v')[0];if(c.getAttribute('t')==='s')return strings[Number(v?.textContent||0)]||'';if(c.getAttribute('t')==='inlineStr')return xmlText(c,'t');return v?.textContent||''}
@@ -145,10 +148,10 @@ let officialStaff=[],officialMoves=[],officialProject='',officialSchedules=new M
 function movementInPeriod(m,from,to){return !!m.fecha_inicio&&m.estado!=='anulado'&&m.fecha_inicio<=to&&(m.fecha_fin||m.fecha_inicio)>=from;}
 async function prepareOfficial(){try{
 const p=$('ofiProyecto').value,from=$('ofiDesde').value,to=$('ofiHasta').value;if(!p||!from||!to||from>to)throw Error('Seleccioná proyecto y fechas válidas.');
-const proj=projects.find(x=>x.id===p);if(!proj)throw Error('Proyecto no disponible.');
-const {data:staff,error}=await db.from('vacaciones_expedientes_v2').select('id,expediente,proyecto').eq('proyecto',proj.codigo_vacaciones);if(error)throw error;
-let moves=[],page=0;while(true){const {data,error}=await db.from('planillas_movimientos').select('*').eq('proyecto_id',p).lte('fecha_inicio',to).or('and(fecha_fin.is.null,fecha_inicio.gte.'+from+'),fecha_fin.gte.'+from).neq('estado','anulado').range(page*500,page*500+499);if(error)throw error;moves.push(...(data||[]).filter(m=>movementInPeriod(m,from,to)));if(!data||data.length<500)break;page++;}
-officialStaff=staff||[];officialMoves=moves;officialProject=p;officialPeriod=from+'|'+to;officialSchedules=new Map();
+const proj=officialReportProject(p);if(!proj)throw Error('Proyecto no disponible.');
+const {data:staff,error}=await db.from('vacaciones_expedientes_v2').select('id,expediente,proyecto').in('proyecto',proj.sourceProjects.map(x=>x.codigo_vacaciones));if(error)throw error;
+let moves=[],page=0;while(true){const {data,error}=await db.from('planillas_movimientos').select('*').in('proyecto_id',proj.sourceProjects.map(x=>x.id)).lte('fecha_inicio',to).or('and(fecha_fin.is.null,fecha_inicio.gte.'+from+'),fecha_fin.gte.'+from).neq('estado','anulado').range(page*500,page*500+499);if(error)throw error;moves.push(...(data||[]).filter(m=>movementInPeriod(m,from,to)));if(!data||data.length<500)break;page++;}
+officialStaff=[...new Map((staff||[]).map(x=>[x.id,x])).values()];officialMoves=moves;officialProject=p;officialPeriod=from+'|'+to;officialSchedules=new Map();
 const ids=officialStaff.map(x=>x.id);if(ids.length){const {data:sch,error:se}=await db.from('vacaciones_horarios_v2').select('expediente_id,vigente_desde,turno,jornada,continuidad_pendiente,horario').in('expediente_id',ids).lte('vigente_desde',from).order('vigente_desde',{ascending:false});if(se)throw se;for(const h of sch||[])if(!officialSchedules.has(h.expediente_id))officialSchedules.set(h.expediente_id,h);}
 
 $('ofiTurnos').innerHTML='<h3>Turnos y horarios registrados</h3><p class="muted">Se utiliza el horario vigente al inicio de la semana. No se inventan turnos ni horas. Las jornadas pendientes se muestran para revisión.</p>'+(officialStaff.length?'<table><tr><th>Colaborador</th><th>Posición</th><th>Turno</th><th>Jornada</th><th>Vigente desde</th><th>Revisión</th></tr>'+officialStaff.map(x=>{const h=officialSchedules.get(x.id);return '<tr><td>'+esc(x.expediente?.nombre||x.id)+'</td><td>'+esc(x.expediente?.posicion||'SIN POSICIÓN')+'</td><td>'+esc(h?.turno||'SIN HORARIO')+'</td><td>'+esc(h?.jornada||'')+'</td><td>'+esc(h?.vigente_desde||'')+'</td><td>'+esc(h?.continuidad_pendiente?'Continua/discontinua pendiente':'')+'</td></tr>'}).join('')+'</table>':'<p>No hay colaboradores registrados.</p>');
@@ -211,7 +214,7 @@ function writeNumber(r,col,value){const c=getCell(rows.get(r),col);while(c.first
 function copySampleCalculatedCells(sampleRow,targetRow){const source=rows.get(sampleRow),dest=rows.get(targetRow);if(!source||!dest)throw Error('Falta fila de fórmulas de almuerzo.');for(const col of ['K','N','Q','T','W','Z','AC']){const sc=xCells(source).find(x=>x.getAttribute('r')===col+sampleRow),sf=sc?.getElementsByTagNameNS(ns,'f')[0];if(!sf?.textContent)throw Error('Falta fórmula oficial de almuerzo '+col+sampleRow);const target=getCell(dest,col);while(target.firstChild)target.removeChild(target.firstChild);target.removeAttribute('t');const f=doc.createElementNS(ns,'f');f.textContent=translateFormula(sf.textContent,col+sampleRow,col+targetRow);target.appendChild(f);}}
 
 function writeFormula(r,col,formula,cached){const c=getCell(rows.get(r),col);while(c.firstChild)c.removeChild(c.firstChild);c.removeAttribute('t');const f=doc.createElementNS(ns,'f');f.textContent=formula;const v=doc.createElementNS(ns,'v');v.textContent=String(cached);c.appendChild(f);c.appendChild(v);}
-const proj=projects.find(x=>x.id===p);writeText(3,'L',proj.nombre+' · '+from+' al '+to);
+const proj=officialReportProject(p);if(!proj)throw Error('Proyecto no disponible.');writeText(3,'L',proj.nombre+' · '+from+' al '+to);
 // Los textos oficiales de jornada están en C203:C216 como cadenas compartidas.
 const sharedPath='xl/sharedStrings.xml',sharedDoc=xmlParse(await zip.file(sharedPath).async('string'));
 const sharedItems=[...sharedDoc.getElementsByTagNameNS(ns,'si')];
