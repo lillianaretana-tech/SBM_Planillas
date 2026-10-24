@@ -1,0 +1,3 @@
+alter table public.planillas_movimientos drop constraint planillas_movimientos_tipo_check;
+alter table public.planillas_movimientos add constraint planillas_movimientos_tipo_check check(tipo in ('AJ','AI','PP','HE','VAC','INC','CITA','OTRO','ASIGNACION','ORD'));
+alter table public.planillas_movimientos add constraint planillas_ordinarias_por_dia check(tipo<>'ORD' or (horas is not null and horas>0 and horas<=24 and (fecha_fin is null or fecha_fin=fecha_inicio)));
