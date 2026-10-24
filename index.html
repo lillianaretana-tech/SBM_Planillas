@@ -115,7 +115,13 @@ function updateIncapacityFields(prefix){
 function quoteLabel(row){return row.con_cotizacion?'Con cotización'+(row.cotizacion_referencia?' '+row.cotizacion_referencia:'')+' · excluido del RH-F-24':'';}
 function updateQuoteFields(prefix){const type=prefix==='mov'?$('tipo').value:prefix==='edit'?$('editTipo').value:null,eligible=prefix==='cov'||['HE','ORD'].includes(type);$(prefix+'QuoteGroup').classList.toggle('hidden',!eligible);if(!eligible){$(prefix+'ConCotizacion').checked=false;$(prefix+'QuoteRef').value='';}$(prefix+'QuoteRef').disabled=!$(prefix+'ConCotizacion').checked;}
 function quoteFields(prefix,type=null){const enabled=$(prefix+'ConCotizacion').checked&&(prefix==='cov'||['HE','ORD'].includes(type));return {con_cotizacion:enabled,cotizacion_referencia:enabled?$(prefix+'QuoteRef').value.trim()||null:null};}
-function rh24CheckQuoteMirrors(movements,covers){for(const m of movements.filter(m=>['HE','ORD'].includes(m.tipo))){const types=m.tipo==='HE'?['extra_1_5','doble']:['ordinaria'];if(covers.some(c=>c.cubre_expediente_id===m.expediente_id&&types.includes(c.tipo_hora)&&movementInPeriod(m,c.fecha,c.fecha)&&!!c.con_cotizacion!==!!m.con_cotizacion))throw Error('Hay horas y coberturas de la misma persona y fecha con distinta marca de cotización. Revisá ambos registros antes de generar el RH-F-24.');}}
+function rh24CheckQuoteMirrors(movements,covers){
+ const groups=new Map(),group=(id,date,kind)=>{const key=id+'|'+date+'|'+kind;if(!groups.has(key))groups.set(key,{paid:0,paidQuote:0,covered:0,coveredQuote:0});return groups.get(key);};
+ for(const m of movements.filter(m=>['HE','ORD'].includes(m.tipo)&&(m.fecha_fin||m.fecha_inicio)===m.fecha_inicio)){const g=group(m.expediente_id,m.fecha_inicio,m.tipo),n=Number(m.horas)||0;g.paid+=n;if(m.con_cotizacion)g.paidQuote+=n;}
+ for(const c of covers){const g=group(c.cubre_expediente_id,c.fecha,c.tipo_hora==='ordinaria'?'ORD':'HE'),n=Number(c.horas)||0;g.covered+=n;if(c.con_cotizacion)g.coveredQuote+=n;}
+ for(const g of groups.values())if(g.paid>0&&g.covered>0&&Math.abs(g.paid-g.covered)<0.000001&&Math.abs(g.paidQuote-g.coveredQuote)>0.000001)throw Error('Hay horas y coberturas de la misma persona y fecha con distinta marca de cotización. Revisá ambos registros antes de generar el RH-F-24.');
+}
+
 function updateMovementFields(){const isORD=$('tipo').value==='ORD',isHE=$('tipo').value==='HE',isBackup=$('tipo').value==='ASIGNACION';$('horas').required=isHE||isORD;$('horasLabel').textContent=isORD?'Horas ordinarias / feriado (obligatorias)':isHE?'Horas extras 1.5 (obligatorias)':'Horas (opcional)';$('ubicacionGroup').style.display=isBackup?'':'none';if(!isBackup)$('ubicacion').value='';updateIncapacityFields('mov');updateQuoteFields('mov');}
 $('tipo').addEventListener('change',updateMovementFields);
 for(const id of ['inicio','fin','movIncapacityEntity','movIncapacityOriginal'])$(id).addEventListener('change',()=>updateIncapacityFields('mov'));
