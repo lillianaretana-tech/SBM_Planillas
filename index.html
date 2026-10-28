@@ -452,6 +452,15 @@ function rh24ReportScope(pid){
  if(sources.some(p=>!p))throw Error('El RH-F-24 conjunto de Uber requiere acceso a Uber COE, Cedral y Bambú.');
  return {ids:[...new Set(sources.map(p=>p.id))],nombre:'Uber COE, Cedral y Bambú'};
 }
+function rh24RestoreDay18Formulas(doc,source){
+ const refs=['E9','P9','Q9','R9','S9','T9','U9','V9','AB9','AC9','AD9','AE9','AF9'];
+ const cells=d=>new Map([...d.getElementsByTagNameNS(xmlNS,'c')].map(c=>[c.getAttribute('r'),c])),target=cells(doc),model=cells(source);
+ let restored=0;for(const ref of refs){const cell=target.get(ref);if(cell?.getElementsByTagNameNS(xmlNS,'f').length)continue;
+ const formula=model.get(ref)?.getElementsByTagNameNS(xmlNS,'f')[0]?.textContent;if(!cell||!formula)throw Error('No se pudo restaurar la fórmula oficial '+ref+' de la hoja 18.');
+ for(const child of [...cell.children])if(['v','is','f'].includes(child.localName))cell.removeChild(child);cell.removeAttribute('t');
+ const f=doc.createElementNS(xmlNS,'f');f.textContent=formula;cell.appendChild(f);restored++;}
+ return restored;
+}
 async function exportRH24(){try{
  const pid=$('covProject').value,start=$('rh24Start').value,file=$('rh24File').files[0];
  if(!pid||!start)throw Error('Seleccioná proyecto y primer día del control.');
@@ -467,6 +476,9 @@ async function exportRH24(){try{
  const ssEntry=zip.file('xl/sharedStrings.xml'),ssDoc=ssEntry?xmlParse(await ssEntry.async('string')):null,strings=ssDoc?[...ssDoc.getElementsByTagNameNS(xmlNS,'si')].map(x=>xmlText(x,'t')):[];
  const dailyNumbers=[...sheetmap.keys()].filter(x=>/^[1-9]\d*$/.test(x)).map(Number).sort((a,b)=>a-b);
  if(!dailyNumbers.length||dailyNumbers.some((n,i)=>n!==i+1))throw Error('Las hojas diarias deben estar numeradas desde 1, sin saltos.');
+ const firstTarget=relmap.get(sheetmap.get('1'));if(!firstTarget)throw Error('Falta la hoja modelo 1.');
+ const firstPath=firstTarget.startsWith('/')?firstTarget.slice(1):'xl/'+firstTarget.replace(/^\.\.\//,'');
+ const formulaModel=xmlParse(await zip.file(firstPath).async('string'));
  const base=new Date(start+'T12:00:00'),lastDay=new Date(base);lastDay.setDate(base.getDate()+dailyNumbers.length-1);
  const dayISO=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),lastISO=dayISO(lastDay);
  const vacancyPosition=v=>v.puesto_rh24||(['MISCELANEO','MISCELANEO A'].includes(normName(v.posicion))?'Misceláneo (a)':'');
@@ -492,7 +504,7 @@ async function exportRH24(){try{
   const day=new Date(base);day.setDate(base.getDate()+i-1);const iso=dayISO(day),relevant=(vac||[]).filter(v=>v.fecha_inicio<=iso&&(!v.fecha_fin||v.fecha_fin>=iso));
   const target=relmap.get(sheetmap.get(String(i)));if(!target)throw Error('Falta hoja diaria '+i);
   const path=target.startsWith('/')?target.slice(1):'xl/'+target.replace(/^\.\.\//,'');const entry=zip.file(path);if(!entry)throw Error('Falta archivo interno de hoja '+i);
-  const doc=xmlParse(await entry.async('string')),rows=[...doc.getElementsByTagNameNS(xmlNS,'row')],rowmap=new Map(rows.map(x=>[Number(x.getAttribute('r')),x]));
+  const doc=xmlParse(await entry.async('string'));if(i===18)rh24RestoreDay18Formulas(doc,formulaModel);const rows=[...doc.getElementsByTagNameNS(xmlNS,'row')],rowmap=new Map(rows.map(x=>[Number(x.getAttribute('r')),x]));
   const readCell=(row,col)=>[...row.getElementsByTagNameNS(xmlNS,'c')].find(x=>x.parentNode===row&&x.getAttribute('r')===col+row.getAttribute('r'));
   const value=x=>x?.getElementsByTagNameNS(xmlNS,'v')[0]?.textContent||'';
   const colnum=col=>[...col].reduce((n,x)=>n*26+x.charCodeAt(0)-64,0);
@@ -529,7 +541,7 @@ async function exportRH24(){try{
   zip.file(path,new XMLSerializer().serializeToString(doc));
  }
  await resetCalculationChain(zip);
- const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=rh24Filename(scope.nombre,$('rh24Month').value||start.slice(0,7));document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
+ const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=rh24Filename(scope.nombre,$('rh24Month').value||start.slice(0,7));document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
  $('rh24Status').textContent='Generado: '+dailyNumbers.length+' hojas desde '+start+'; '+count+' marcas de vacante, '+actionCount+' registros de ausencias/permisos/vacaciones/incapacidades y '+coverageCount+' registros de horas asignadas. Se incluyen coberturas registradas y extras del proyecto, sin duplicarlas. '+(movementRows.filter(m=>m.con_cotizacion).length+coverageRows.filter(c=>c.con_cotizacion).length)+' registros con cotización excluidos.';
  notice('RH-F-24 descargado. Revisá los datos y totales antes de enviarlo.');
  }catch(e){notice('RH-F-24: '+e.message,true);$('rh24Status').textContent=e.message;}}
