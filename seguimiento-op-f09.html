@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seguimiento OP-F-09</title>
+<body data-op-f09-external>
+<h1>Seguimiento OP-F-09</h1>
+<form id="login">
+  <label>Correo <input type="email" name="email" autocomplete="username" required></label>
+  <label>Contraseña <input type="password" name="password" autocomplete="current-password" required></label>
+  <button>Ingresar</button>
+</form>
+<p id="message" role="status"></p>
+<div id="app" hidden><button id="logout">Cerrar sesión</button></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.0/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script>
+const db=window.supabase.createClient('https://ihajshxnmakyobcubqlq.supabase.co','sb_publishable_c4A_lPxTe0FCm_KoChNIGQ_yMlt6lV5');
+const projects = [];
+const form = document.getElementById('login');
+const message = document.getElementById('message');
+const app = document.getElementById('app');
+async function showAccess() {
+  const {data:{user}} = await db.auth.getUser();
+  if (!user) return;
+  const {data,error} = await db.from('op_f09_externos').select('usuario').maybeSingle();
+  if (error || !data) {
+    await db.auth.signOut({scope:'local'});
+    message.textContent = 'Esta cuenta no está habilitada para el seguimiento externo.';
+    return;
+  }
+  form.hidden = true;
+  app.hidden = false;
+  message.textContent = '';
+}
+form.onsubmit = async event => {
+  event.preventDefault();
+  const {email,password} = Object.fromEntries(new FormData(form));
+  const {error} = await db.auth.signInWithPassword({email,password});
+  form.elements.password.value = '';
+  if (error) message.textContent = 'No se pudo iniciar sesión. Revisá el correo y la contraseña.';
+  else await showAccess();
+};
+document.getElementById('logout').onclick = async () => {
+  const {error} = await db.auth.signOut({scope:'local'});
+  if (error) message.textContent = 'No se pudo cerrar la sesión.';
+  else location.reload();
+};
+showAccess();
+</script>
+<script src="seguimiento-op-f09.js"></script>
+</body></html>
