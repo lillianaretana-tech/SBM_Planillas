@@ -457,7 +457,8 @@ function rh24PersonClassification(person,schedule){
 
  const puesto=rh24PersonPosition(person),horario=({diurno:'Diurno',mixto:'Tarde Noche',nocturno:'Nocturno'})[schedule?.turno];
  const type=normName(schedule?.jornada).split(' ')[0],jornada=['COMPLETA','PARCIAL'].includes(type)&&horario?(type==='COMPLETA'?'Completa ':'Parcial ')+({diurno:'Diurna',mixto:'Tarde Noche',nocturno:'Nocturna'})[schedule.turno]:null;
- if(!person||!horario||!jornada)throw Error('Revisá horario y jornada vigente de '+(person?.expediente?.nombre||'un colaborador del movimiento')+'.');return {puesto,horario,jornada};
+ if(!person||!horario||!jornada)throw Error('Revisá horario y jornada vigente de '+(person?.expediente?.nombre||'un colaborador del movimiento')+'.');// The official RH-F-24 lookup includes a trailing space in the complete mixed-shift label.
+ return {puesto,horario,jornada:jornada==='Completa Tarde Noche'?jornada+' ':jornada};
 }
 function rh24DailyAction(m,date){
  if(m.tipo==='INC')return {col:incapacityColumn(m,date),value:1};
