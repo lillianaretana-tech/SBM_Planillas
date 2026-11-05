@@ -570,7 +570,25 @@ async function exportRH24(){try{
   const value=x=>x?.getElementsByTagNameNS(xmlNS,'v')[0]?.textContent||'';
   const colnum=col=>[...col].reduce((n,x)=>n*26+x.charCodeAt(0)-64,0);
   const cell=(row,col)=>{let c=readCell(row,col);if(!c){c=doc.createElementNS(xmlNS,'c');c.setAttribute('r',col+row.getAttribute('r'));const next=[...row.children].find(x=>x.localName==='c'&&colnum(x.getAttribute('r').replace(/\d+$/,''))>colnum(col));row.insertBefore(c,next||null);}if(c.getElementsByTagNameNS(xmlNS,'f').length)throw Error('El machote tiene una fórmula en una celda de entrada: '+c.getAttribute('r'));return c;};
-  const write=(row,col,text)=>{const c=cell(row,col);while(c.firstChild)c.removeChild(c.firstChild);c.setAttribute('t','inlineStr');const ins=doc.createElementNS(xmlNS,'is'),t=doc.createElementNS(xmlNS,'t');t.textContent=String(text);ins.appendChild(t);c.appendChild(ins);};
+  const write=(row,col,text)=>{
+   const c=cell(row,col),label=String(text);
+   while(c.firstChild)c.removeChild(c.firstChild);
+   // Reuse the exact catalog text for jornada, including its significant whitespace.
+   const sharedIndex=col==='F'?strings.indexOf(label):-1;
+   if(sharedIndex>=0){
+    c.setAttribute('t','s');
+    const v=doc.createElementNS(xmlNS,'v');
+    v.textContent=String(sharedIndex);
+    c.appendChild(v);
+    return;
+   }
+   c.setAttribute('t','inlineStr');
+   const ins=doc.createElementNS(xmlNS,'is'),t=doc.createElementNS(xmlNS,'t');
+   if(label!==label.trim())t.setAttributeNS('http://www.w3.org/XML/1998/namespace','xml:space','preserve');
+   t.textContent=label;
+   ins.appendChild(t);
+   c.appendChild(ins);
+  };
   const number=(row,col,n)=>{const c=cell(row,col);while(c.firstChild)c.removeChild(c.firstChild);c.removeAttribute('t');const v=doc.createElementNS(xmlNS,'v');v.textContent=String(n);c.appendChild(v);};
   const inputs=['G','H','I','J','K','L','M','N','O'],daily=movements.filter(m=>movementInPeriod(m,iso,iso)),actions=new Map();
   for(const m of daily.filter(m=>!['HE','ORD'].includes(m.tipo))){const person=personMap.get(m.expediente_id);let action;try{action=rh24DailyAction(m,iso);}catch(e){throw Error(movementLabel(m)+': '+e.message);}if(!person)throw Error('No se puede consultar al colaborador de un movimiento.');let item=actions.get(m.expediente_id);if(!item){item={person,classification:rh24PersonClassification(person,scheduleAt(m.expediente_id,iso)),inputs:new Map()};actions.set(m.expediente_id,item);}const isFlag=['L','M','N','O'].includes(action.col);if([...item.inputs.keys()].some(c=>(isFlag||['L','M','N','O'].includes(c))&&c!==action.col))throw Error('Hay acciones superpuestas para '+person.expediente.nombre+' el '+iso+'. Revisá Historial.');item.inputs.set(action.col,isFlag?1:(item.inputs.get(action.col)||0)+action.value);}
